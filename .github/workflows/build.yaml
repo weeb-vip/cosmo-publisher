@@ -1,0 +1,44 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ${{ secrets.REGISTRY }}/weeb-vip/cosmo-publisher
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: docker build --platform linux/amd64 -t "cosmo-publisher:${{ steps.version.outputs.version }}" .
+
+      - name: Smoke test
+        run: |
+          docker run --rm --entrypoint wgc "cosmo-publisher:${{ steps.version.outputs.version }}" --version
+          # The entrypoint must refuse to run without its inputs rather than publish garbage.
+          if docker run --rm "cosmo-publisher:${{ steps.version.outputs.version }}"; then
+            echo "entrypoint ran without required env" >&2; exit 1
+          fi
+
+      - name: Login to Harbor
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Push
+        if: github.event_name != 'pull_request'
+        run: |
+          docker tag "cosmo-publisher:${{ steps.version.outputs.version }}" "$IMAGE:${{ steps.version.outputs.version }}"
+          docker push "$IMAGE:${{ steps.version.outputs.version }}"
