@@ -1,44 +1,85 @@
-name: Build
+name: Docker Image CI
 
 on:
   push:
-    branches: [main]
+    branches: [ "main" ]
   pull_request:
-  workflow_dispatch:
+    branches: [ "main" ]
 
 jobs:
-  build:
+
+  test:
+    name: build and smoke test
     runs-on: ubuntu-latest
-    env:
-      IMAGE: ${{ secrets.REGISTRY }}/weeb-vip/cosmo-publisher
     steps:
       - uses: actions/checkout@v4
-
-      - name: Read version
-        id: version
-        run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
-
       - name: Build
-        run: docker build --platform linux/amd64 -t "cosmo-publisher:${{ steps.version.outputs.version }}" .
-
-      - name: Smoke test
+        run: docker build --build-arg VERSION=${{ github.sha }} -t cosmo-publisher:test .
+      - name: wgc is installed and pinned
         run: |
-          docker run --rm --entrypoint wgc "cosmo-publisher:${{ steps.version.outputs.version }}" --version
-          # The entrypoint must refuse to run without its inputs rather than publish garbage.
-          if docker run --rm "cosmo-publisher:${{ steps.version.outputs.version }}"; then
+          got=$(docker run --rm --entrypoint wgc cosmo-publisher:test --version | tail -1)
+          want=$(sed -nE 's/^ARG WGC_VERSION=(.*)$/\1/p' Dockerfile)
+          echo "wgc $got (want $want)"
+          test "$got" = "$want"
+      - name: entrypoint refuses to run without its inputs
+        run: |
+          if docker run --rm cosmo-publisher:test; then
             echo "entrypoint ran without required env" >&2; exit 1
           fi
 
+  release:
+    # semantic-release builds the image from the release commit, tags it with the
+    # new version and `latest`, pushes both to Harbor, then bumps every
+    # `tag: X # cosmo-publisher` in weeb-argocd.
+    runs-on: ubuntu-latest
+    needs: [ test ]
+    if: github.event_name == 'push'
+    steps:
+      - name: Set repo name environment variable
+        run: echo "REPO_NAME=${GITHUB_REPOSITORY#*/}" >> $GITHUB_ENV
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.ACCESS_TOKEN }}
       - name: Login to Harbor
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ secrets.REGISTRY }}
           username: ${{ secrets.REGISTRY_USERNAME }}
           password: ${{ secrets.REGISTRY_PASSWORD }}
+      - name: release
+        id: semantic
+        uses: cycjimmy/semantic-release-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+          DOCKER_REPO_TEST: ${{ secrets.REGISTRY }}/weeb-vip/${{ env.REPO_NAME }}
+          DOCKER_REPO_PROD: ${{ secrets.REGISTRY }}/weeb-vip/${{ env.REPO_NAME }}
+        with:
+          semantic_version: 18
+          extra_plugins: |
+            @semantic-release/git@10.0.1
+            @semantic-release/exec@6.0.2
+            @semantic-release/changelog@6.0.1
 
-      - name: Push
-        if: github.event_name != 'pull_request'
+      - name: checkout argocd repo
+        if: steps.semantic.outputs.new_release_published == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: 'weeb-vip/weeb-argocd'
+          token: ${{ secrets.ACCESS_TOKEN }}
+          path: 'argocd'
+      - name: deploy to argocd
+        if: steps.semantic.outputs.new_release_published == 'true'
+        env:
+          REPO_NAME: ${{ env.REPO_NAME }}
+          RELEASE_VERSION: ${{ steps.semantic.outputs.new_release_version }}
         run: |
-          docker tag "cosmo-publisher:${{ steps.version.outputs.version }}" "$IMAGE:${{ steps.version.outputs.version }}"
-          docker push "$IMAGE:${{ steps.version.outputs.version }}"
+          RELEASE_VERSION=$(echo $RELEASE_VERSION | sed 's/v//')
+          cd argocd && find . -type f -name '*.yaml' -print0 | xargs -0 sed -E -i 's/(tag:[[:space:]]).*( # '"$REPO_NAME"')/\1'"$RELEASE_VERSION"'\2/'
+          git config --global user.email "noreply@weeb.vip"
+          git config --global user.name "weeb-vip"
+          if git diff --quiet; then
+            echo "argocd already references $RELEASE_VERSION (or no chart uses this image yet)"; exit 0
+          fi
+          git add .
+          git commit -m "feat: $REPO_NAME $RELEASE_VERSION"
+          git push origin main

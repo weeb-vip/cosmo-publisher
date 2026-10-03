@@ -24,18 +24,22 @@ the whole supergraph) and reasserts labels with `wgc subgraph update`, because
 
 ## Releasing
 
-1. Bump `VERSION` (and `WGC_VERSION` in the Dockerfile if `wgc` changes).
-2. Merge to `main`; CI pushes `harbor.floret.dev/weeb-vip/cosmo-publisher:<VERSION>`.
-3. Bump `publishSchema.image.tag` in weeb-argocd `graphql/values.yaml` and
-   `graphql-staging/values.yaml`.
+Releases are cut by semantic-release on every push to `main`, from the PR
+titles (the PR title check enforces conventional commits):
+
+- `fix:` → patch, `feat:` → minor, `BREAKING CHANGE` footer → major.
+- CI builds the image, pushes `harbor.floret.dev/weeb-vip/cosmo-publisher:<version>`
+  and `:latest`, creates the GitHub release, and bumps every
+  `tag: X # cosmo-publisher` line in weeb-argocd so the hooks pick it up on
+  the next sync.
 
 `wgc` is pinned on purpose: newer releases can be incompatible with the deployed
 `cosmo-controlplane` (0.131.2+ sends a 120s RPC timeout that controlplane 0.133.1
-rejects). Upgrade the two together.
+rejects). Upgrade the two together, and make that PR a `feat:`.
 
 ## Local build
 
 ```sh
-docker build --platform linux/amd64 -t harbor.floret.dev/weeb-vip/cosmo-publisher:$(cat VERSION) .
-docker run --rm --entrypoint wgc harbor.floret.dev/weeb-vip/cosmo-publisher:$(cat VERSION) --version
+docker build -t cosmo-publisher:dev .
+docker run --rm --entrypoint wgc cosmo-publisher:dev --version
 ```

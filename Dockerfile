@@ -9,6 +9,10 @@
 FROM node:22-alpine
 
 ARG WGC_VERSION=0.131.1
+# Set by semantic-release at build time; purely informational.
+ARG VERSION=dev
+LABEL org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.source="https://github.com/weeb-vip/cosmo-publisher"
 
 RUN apk add --no-cache curl jq \
     && npm install -g "wgc@${WGC_VERSION}" \
